@@ -1,5 +1,6 @@
 local utils = require("unity.utils")
 local config = require("unity.config")
+require("lfs")
 
 local XmlCsprojHandler = {}
 XmlCsprojHandler.__index = XmlCsprojHandler
@@ -18,11 +19,12 @@ function XmlCsprojHandler:updateRoot()
 end
 
 -- Função para criar um novo objeto
+-- Function to create a new object
 function XmlCsprojHandler:new()
 	local obj = {
-		rootFolder = nil, -- Variável da instância
+		rootFolder = nil, -- Variável da instância / Instance variable
 		hasCSProjectUnityCapability = false,
-		lspName = "omnisharp",
+		lspName = "roslyn", -- "omnisharp",
 	}
 	setmetatable(obj, self)
 	self.__index = self
@@ -30,30 +32,38 @@ function XmlCsprojHandler:new()
 end
 
 -- Função para carregar o arquivo .csproj
+-- Function to load the .csproj file
 function XmlCsprojHandler:load(filename)
 	local file = io.open(filename, "r")
 	if not file then
 		return false, "File not found"
 	end
-	self.content = file:read("*a")
+	self.content[file][filename] = file:read("*a")
 	file:close()
 	return true
 end
 
 -- Função para salvar o arquivo .csproj
+-- Function to save the .csproj file
 function XmlCsprojHandler:save()
-	local file = io.open(self.rootFolder .. "/Assembly-CSharp.csproj", "w")
-	if not file then
-		return false, "Cannot open file for writing"
+	for filename in lfs.dir(self.rootFolder) do
+		if filename:match("%.csproj$") then
+			local file = io.open(self.rootFolder .. filename, "w")
+			if not file then
+				return false, "Cannot open file for writing"
+			end
+			file:write(self.content[file][filename])
+			file:close()
+		end
 	end
-	file:write(self.content)
-	file:close()
 	return true
 end
 
 -- Função para checar se o projeto é um Unity Project
+-- Function to check if the project is a Unity Project
 function XmlCsprojHandler:validateProject()
 	-- Verifica se o RootFolder está definido
+	-- Checks if the RootFolder is set
 	if not self.rootFolder then
 		return false, "No Unity Project found"
 	end
@@ -63,53 +73,66 @@ function XmlCsprojHandler:validateProject()
 	end
 
 	-- Caminho do Assembly-CSharp.csproj
-	local filePath = self.rootFolder .. "/Assembly-CSharp.csproj"
+	-- Path of Assembly-CSharp.csproj
+	for file in lfs.dir(self.rootFolder) do
+		if file:match("%.csproj$") then
+			local filepath = self.rootFolder .. file
+			-- Verifica se o arquivo existe
+			-- Checks if the file exists
+			if not utils.fileExists(filepath) then
+				return false, "No CsProject found, regenerate project files in Unity"
+			end
 
-	-- Verifica se o arquivo existe
-	if not utils.fileExists(filePath) then
-		return false, "No CsProject found, regenerate project files in Unity"
+			-- Carrega o XML do arquivo .csproj
+			-- Loads the XML from the .csproj file
+			if not self:load(filepath) then
+				return false, "Failed to load the Assembly-CSharp.csproj file"
+			end
+
+			-- Verifica se o projeto é do Unity
+			-- Checks if the project is Unity
+			self.hasCSProjectUnityCapability = self:checkProjectCapability(file, "Unity")
+		end
 	end
-
-	-- Carrega o XML do arquivo .csproj
-	if not self:load(filePath) then
-		return false, "Failed to load the Assembly-CSharp.csproj file"
-	end
-
-	-- Verifica se o projeto é do Unity
-	self.hasCSProjectUnityCapability = self:checkProjectCapability("Unity")
 
 	return self.hasCSProjectUnityCapability, "This is an Unity Project ready to sync"
 end
 
 -- Função para checar a tag ProjectCapability e seu atributo
-function XmlCsprojHandler:checkProjectCapability(attribute)
+-- Function to check the ProjectCapability tag and its attribute
+function XmlCsprojHandler:checkProjectCapability(file, attribute)
 	local pattern = '<ProjectCapability.-Include="' .. attribute .. '".-/>'
-	if self.content:match(pattern) then
+	if self.content[file]:match(pattern) then
 		return true
 	end
 	return false
 end
 
 -- Função para adicionar uma nova Compile tag
-function XmlCsprojHandler:addCompileTag(value)
+-- Function to add a new Compile tag
+function XmlCsprojHandler:addCompileTag(file, value)
 	-- Protege o valor para uso em pattern
+	-- Protects value for use in pattern
 	local escapedValue = value:gsub("([%.%+%-%*%?%^%$%(%)%[%]%%])", "%%%1")
 	local existingPattern = "<Compile%s+Include%s*=%s*[\"']" .. escapedValue .. "[\"']%s*/?>"
 
 	-- Evita duplicação
-	if self.content:match(existingPattern) then
+	-- Avoids duplication
+	if self.content[file]:match(existingPattern) then
 		return false, "[NvimUnity] Script already added in Unity project"
 	end
 
 	-- Se placeholder existe, insere nele
+	-- If placeholder exists, insert it into it
 	local placeholderPattern = "<!%-%- {{COMPILE_INCLUDES}} %-%->"
-	if self.content:match(placeholderPattern) then
+	if self.content[file]:match(placeholderPattern) then
 		local newLine = '    <Compile Include="' .. value .. '" />\n    <!-- {{COMPILE_INCLUDES}} -->'
-		self.content = self.content:gsub(placeholderPattern, newLine, 1)
+		self.content[file] = self.content[file]:gsub(placeholderPattern, newLine, 1)
 		return true, "[NvimUnity] Script added to Unity project"
 	end
 
 	-- Se não existe placeholder, adiciona bloco novo com placeholder e tag
+	-- If there is no placeholder, add new block with placeholder and tag
 	local newItemGroup = "  <ItemGroup>\n"
 		.. "<!-- Auto-generated block: do not modify manually or remove these commented lines -->\n"
 		.. "<!-- {{COMPILE_INCLUDES}} -->\n"
@@ -119,18 +142,21 @@ function XmlCsprojHandler:addCompileTag(value)
 		.. "  </ItemGroup>"
 
 	-- Extrai a tag <Project>
-	local openTag, innerContent, closeTag = self.content:match("(<Project.-\n)(.-)(</Project>)")
+	-- Extract the tag
+	local openTag, innerContent, closeTag = self.content[file]:match("(<Project.-\n)(.-)(</Project>)")
 	if not openTag then
 		return false, "[NvimUnity] <Project> tag not found"
 	end
 
 	-- Divide em linhas para inserir corretamente
+	-- Splits into rows to insert correctly
 	local lines = {}
 	for line in innerContent:gmatch("([^\n]*)\n?") do
 		table.insert(lines, line)
 	end
 
 	-- Conta filhos diretos
+	-- Direct children account
 	local depth, childrenCount, insertLine = 0, 0, #lines + 1
 	for i, line in ipairs(lines) do
 		local open = line:match("^%s*<([%w%.%-]+)[^>/]*>$")
@@ -155,23 +181,29 @@ function XmlCsprojHandler:addCompileTag(value)
 	end
 
 	-- Insere o novo bloco na posição definida
+	-- Inserts the new block at the defined position
 	table.insert(lines, insertLine, newItemGroup)
-	self.content = openTag .. table.concat(lines, "\n") .. "\n" .. closeTag
+	self.content[file] = openTag .. table.concat(lines, "\n") .. "\n" .. closeTag
 
 	return true, "[NvimUnity] Script added and placeholder created"
 end
 
 -- Função para adicionar ou modificar a tag Compile
-function XmlCsprojHandler:updateCompileTags(changes)
+-- Function to add or modify the Compile tag
+function XmlCsprojHandler:updateCompileTags(file, changes)
 	-- Expressão para capturar os <ItemGroup> com tags <Compile>
+	-- Expression to capture the <ItemGroup> tagged with <Compile>
 	local itemGroupPattern = "(<ItemGroup>.-</ItemGroup>)"
 	local updated = {}
 
 	-- Processa cada grupo separadamente
-	self.content = self.content:gsub(itemGroupPattern, function(itemGroup)
+	-- Processes each group separately
+	self.content[file] = self.content[file]:gsub(itemGroupPattern, function(itemGroup)
 		-- Processa apenas <ItemGroup> que contêm <Compile>
+		-- Processes only <ItemGruop> that contain <Compile>
 		if itemGroup:match("<Compile") then
 			-- Modifica apenas os valores dentro deste grupo
+			-- Modify only the values within this group
 			for _, change in ipairs(changes) do
 				if type(change.old) == "string" and type(change.new) == "string" then
 					local oldValue = change.old:gsub("([%.%+%-%*%?%^%$%(%)%[%]%%])", "%%%1")
@@ -194,31 +226,36 @@ function XmlCsprojHandler:updateCompileTags(changes)
 	end)
 
 	return updated -- opcional: retorna as alterações feitas
+	-- Optional: Returns the changes you made
 end
 
 -- Função para remover uma tag Compile
-function XmlCsprojHandler:removeCompileTag(attribute)
+-- Function to remove a Compile tag
+function XmlCsprojHandler:removeCompileTag(file, attribute)
 	local modified = false
 
 	-- Escapa caracteres especiais para regex do Lua
+	-- Escapes special characters for Lua regex
 	local escapedAttribute = attribute:gsub("([%.%+%-%*%?%^%$%(%)%[%]%%])", "%%%1")
 
 	-- Atualiza apenas os ItemGroups que contêm <Compile>
-	self.content = self.content:gsub("(<ItemGroup>.-</ItemGroup>)", function(itemGroup)
+	-- Updates only ItemGroups that contain
+	self.content[file] = self.content[file]:gsub("(<ItemGroup>.-</ItemGroup>)", function(itemGroup)
 		if not itemGroup:match("<Compile") then
-			return itemGroup -- Ignora ItemGroups sem <Compile>
+			return itemGroup -- Ignora ItemGroups sem <Compile> / Ignores ItemGroups without <Compile>
 		end
 
-		local lines = {} -- Guarda as linhas atualizadas do ItemGroup
+		local lines = {} -- Guarda as linhas atualizadas do ItemGroup / Saves the updated ItemGroup rows
 		for line in itemGroup:gmatch("[^\r\n]+") do
 			if not line:match("<Compile%s+Include%s*=%s*['\"]" .. escapedAttribute .. "['\"]") then
-				table.insert(lines, line) -- Mantém linhas que não precisam ser removidas
+				table.insert(lines, line) -- Mantém linhas que não precisam ser removidas / Maintains lines that don't need to be removed
 			else
-				modified = true -- Indica que houve uma remoção
+				modified = true -- Indica que houve uma remoção / Indicates that there has been a removal
 			end
 		end
 
 		-- Remove o ItemGroup inteiro se ele ficou apenas com <ItemGroup>...</ItemGroup>
+		-- Removes the entire ItemGroup if it was left with only <ItemGroup>...</ItemGroup>
 		if #lines == 2 then
 			return ""
 		end
@@ -230,29 +267,34 @@ function XmlCsprojHandler:removeCompileTag(attribute)
 end
 
 -- Função para remover uma ou varias Compile tags pelo nome da pasta
-function XmlCsprojHandler:removeCompileTagsByFolder(folderpath)
+-- Function to remove one or multiple Compile tags by folder name
+function XmlCsprojHandler:removeCompileTagsByFolder(file, folderpath)
 	local modified = false
 
 	-- Escapa caracteres especiais para padrões Lua
+	-- Escapes special characters for Moon patterns
 	local escapedFolderPath = folderpath:gsub("([%.%+%-%*%?%^%$%(%)%[%]%%])", "%%%1")
 
 	-- Atualiza apenas os ItemGroups que contêm <Compile>
-	self.content = self.content:gsub("(<ItemGroup>.-</ItemGroup>)", function(itemGroup)
+	-- Updates only ItemGroups that contain <Compile>
+	self.content[file] = self.content[file]:gsub("(<ItemGroup>.-</ItemGroup>)", function(itemGroup)
 		if not itemGroup:match("<Compile") then
-			return itemGroup -- Ignora ItemGroups sem <Compile>
+			return itemGroup -- Ignora ItemGroups sem <Compile> / Ignores ItemGroups without <Compile>
 		end
 
-		local lines = {} -- Guarda as linhas atualizadas do ItemGroup
+		local lines = {} -- Guarda as linhas atualizadas do ItemGroup / Saves the updated ItemGroup rows
 		for line in itemGroup:gmatch("[^\r\n]+") do
 			-- Remove apenas as tags <Compile> cujo caminho começa com folderpath
+			-- Removes only tags whose path begins with folderpath
 			if not line:match("<Compile%s+Include%s*=%s*['\"]" .. escapedFolderPath .. "[^'\"]*['\"]") then
-				table.insert(lines, line) -- Mantém linhas que não precisam ser removidas
+				table.insert(lines, line) -- Mantém linhas que não precisam ser removidas / Maintains lines that don't need to be removed
 			else
-				modified = true -- Indica que houve remoção
+				modified = true -- Indica que houve remoção / Indicates that there has been a removal
 			end
 		end
 
 		-- Remove o ItemGroup inteiro se ele ficou apenas com <ItemGroup>...</ItemGroup>
+		-- Removes the entire ItemGroup if it was left with only <ItemGroup>...</ItemGroup>
 		if #lines == 2 then
 			return ""
 		end
@@ -264,55 +306,63 @@ function XmlCsprojHandler:removeCompileTagsByFolder(folderpath)
 end
 
 -- Função para remover all Compile tags e preencher com uma nova lista
-function XmlCsprojHandler:resetCompileTags()
+-- Function to remove all Compile tags and populate with a new list
+function XmlCsprojHandler:resetCompileTags(file)
 	local files = utils.getCSFilesInFolder(self.rootFolder .. "/Assets")
 	if #files == 0 then
 		return false, "[NvimUnity] No .cs files found in " .. self.rootFolder .. "/Assets..."
 	end
 
 	-- Criar novo bloco <Compile />
+	-- Create new <Compile/> block
 	local newCompileTags = {}
-	for _, file in ipairs(files) do
-		local cutFile = utils.cutPath(utils.uriToPath(file), "Assets")
+	for _, filename in ipairs(files) do
+		local cutFile = utils.cutPath(utils.uriToPath(filename), "Assets")
 		table.insert(newCompileTags, '    <Compile Include="' .. cutFile .. '" />')
 	end
 	local newBlock = table.concat(newCompileTags, "\n")
 	-- Procurar placeholder
+	-- Search for placeholder
 
 	local placeholderPattern = "<!%-%- %{%{COMPILE_INCLUDES%}%} %-%->"
-	local startPos, endPos = self.content:find(placeholderPattern)
+	local startPos, endPos = self.content[file]:find(placeholderPattern)
 
 	if startPos and endPos then
 		-- Placeholder existe, substituir apenas as <Compile /> após ele
-		local before = self.content:sub(1, endPos)
-		local after = self.content:sub(endPos + 1)
+		-- Placeholder exists, only replace the <Compile /> after it
+		local before = self.content[file]:sub(1, endPos)
+		local after = self.content[file]:sub(endPos + 1)
 
 		-- Remove os <Compile ... /> somente até </ItemGroup>
+		-- Removes <Compile ... /> the only up to </ItemGroup>
 		local itemGroupClose = after:find("</ItemGroup>")
 		if itemGroupClose then
 			local blockBeforeClose = after:sub(1, itemGroupClose - 1)
 			local blockAfterClose = after:sub(itemGroupClose)
 
 			-- Limpa apenas os <Compile /> nesse intervalo
+			-- Clears only the <Compile /> in this range
 			blockBeforeClose = blockBeforeClose:gsub('[ \t]*<Compile%s+Include%s*=%s*"[^"]-"%s*/>%s*\n?', "")
 
 			after = blockBeforeClose .. blockAfterClose
 		end
 
 		-- Garante que o "before" termina com quebra de linha
+		-- Ensures that the "before" ends with a line break
 		if not before:match("\n$") then
 			before = before .. "\n"
 		end
 
-		self.content = before .. newBlock .. after
+		self.content[file] = before .. newBlock .. after
 
 		return true, "[NvimUnity] Compile tags updated using existing placeholder"
 	end
 
 	-- Se NÃO houver placeholder, seguir lógica original, mas inserir o placeholder também
-	self.content = self.content:gsub("<Compile%s+Include%s*=%s*[\"'][^\"']-[\"']%s*/>%s*\n?", "")
+	-- If there is NO placeholder, follow original logic, but insert the placeholder as well
+	self.content[file] = self.content[file]:gsub("<Compile%s+Include%s*=%s*[\"'][^\"']-[\"']%s*/>%s*\n?", "")
 
-	local openTag, innerContent, closeTag = self.content:match("(<Project.-\n)(.-)(</Project>)")
+	local openTag, innerContent, closeTag = self.content[file]:match("(<Project.-\n)(.-)(</Project>)")
 	if not openTag then
 		return false, "[NvimUnity] <Project> tag not found"
 	end
@@ -324,15 +374,17 @@ function XmlCsprojHandler:resetCompileTags()
 
 	local depth = 0
 	local childrenCount = 0
-	local insertLine = #lines + 1 -- Começar no final das linhas, como fallback
+	local insertLine = #lines + 1 -- Começar no final das linhas, como fallback / Start at the end of lines, such as fallback
 
 	-- Identificar a 10ª linha de inserção
+	-- Identify the 10th insertion line
 	for i, line in ipairs(lines) do
 		local open = line:match("^%s*<([%w%.%-]+)[^>/]*>$")
 		local selfClosing = line:match("^%s*<([%w%.%-]+)[^>]-/>%s*$")
 		local close = line:match("^%s*</([%w%.%-]+)>%s*$")
 
 		-- Considerar tags auto-fechadas ou abertas
+		-- Consider auto-closed or open tags
 		if selfClosing and depth == 0 then
 			childrenCount = childrenCount + 1
 		elseif open then
@@ -345,6 +397,7 @@ function XmlCsprojHandler:resetCompileTags()
 		end
 
 		-- Determina a linha de inserção após o 10º filho
+		-- Determines the insertion line after the 10th child
 		if childrenCount == 10 and depth == 0 then
 			insertLine = i + 1
 			break
@@ -352,6 +405,7 @@ function XmlCsprojHandler:resetCompileTags()
 	end
 
 	-- Monta bloco com placeholder + tags
+	-- Assembles block with placeholder + tags
 	local newBlockWithPlaceholderLines = {
 		"  <ItemGroup>",
 		"  <!-- Auto-generated block: do not modify manually or remove these commented lines -->",
@@ -361,11 +415,12 @@ function XmlCsprojHandler:resetCompileTags()
 	}
 
 	-- Inserir o novo bloco nas linhas no local adequado
+	-- Insert the new block into the rows in the proper location
 	for i = #newBlockWithPlaceholderLines, 1, -1 do
 		table.insert(lines, insertLine, newBlockWithPlaceholderLines[i])
 	end
 
-	self.content = openTag .. table.concat(lines, "\n") .. "\n" .. closeTag
+	self.content[file] = openTag .. table.concat(lines, "\n") .. "\n" .. closeTag
 
 	return true, "[NvimUnity] Compile tags inserted with new placeholder"
 end
@@ -375,6 +430,7 @@ function XmlCsprojHandler:openUnity()
 	local unity = config.unity_path
 
 	-- Verificar se Unity já está rodando (simples, por processo)
+	-- Check if Unity is already running (simple, per process)
 	local is_running = vim.fn.system("tasklist"):find("Unity.exe")
 
 	if is_running then
@@ -388,12 +444,14 @@ function XmlCsprojHandler:openUnity()
 	end
 
 	-- Checa se o projeto é Unity (tem pasta Assets)
+	-- Check if the project is Unity (has Assets folder)
 	if vim.fn.isdirectory(root .. "/Assets") == 0 then
 		vim.notify("[nvim-unity] This folder is not a Unity project", vim.log.levels.WARN)
 		return
 	end
 
 	-- Executa Unity com o path do projeto atual
+	-- Runs Unity with the current project path
 	vim.fn.jobstart({ unity, config.unity_path, root }, {
 		detach = true,
 	})
