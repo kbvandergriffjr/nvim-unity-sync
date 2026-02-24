@@ -1,6 +1,6 @@
 local utils = require("unity.utils")
 local config = require("unity.config")
-require("lfs")
+local lfs = require("lfs")
 
 local XmlCsprojHandler = {}
 XmlCsprojHandler.__index = XmlCsprojHandler
