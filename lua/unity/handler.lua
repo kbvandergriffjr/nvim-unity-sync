@@ -15,7 +15,7 @@ end
 
 function XmlCsprojHandler:updateRoot()
 	self.hasCSProjectUnityCapability = false
-	self.rootFolder = vim.fn.getcwd():gsub("\\", "/")--utils.findRootFolder()
+	self.rootFolder = utils.findRootFolder()
 end
 
 -- Função para criar um novo objeto
